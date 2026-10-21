@@ -1,7 +1,7 @@
 import json
 import requests
 import os
-from google_sheets import authenticate_google_sheets
+from google_sheets import authenticate_google_sheets, transfer_quantity
 from googleapiclient.discovery import build
 
 def test_google_auth(event, context):
@@ -57,7 +57,20 @@ def lambda_handler(event, context):
             quantity = int(description.split(":")[1].strip())
             
             print(f"Card moved: {item_name}, {from_stage} -> {to_stage}")
+            if from_stage in ("Printing", "Post-Processing", "Assembly") \
+                    and to_stage in ("Printing", "Post-Processing", "Assembly"):
 
+                creds = authenticate_google_sheets()
+
+                transfer_quantity(
+                    creds,
+                    item_name,
+                    from_stage,
+                    to_stage,
+                    quantity
+                )
+
+                print(f"Transferred {quantity} of '{item_name}' from {from_stage} to {to_stage}")
         return {"statusCode": 200, "body": "OK"}
 
     return {"statusCode": 405, "body": "Method Not Allowed"}

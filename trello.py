@@ -159,3 +159,16 @@ def sync_inventory_to_trello(inventory, board):
                     delete_trello_card(existing_card['id'])
                     cards.remove(existing_card)
 
+def calculate_inventory_adjustments(from_stage, to_stage, quantity):
+    adjustments = {
+        "Post-Processing": 0,
+        "Assembly": 0
+    }
+
+    if from_stage in adjustments:
+        adjustments[from_stage] -= quantity
+
+    if to_stage in adjustments:
+        adjustments[to_stage] += quantity
+
+    return adjustments

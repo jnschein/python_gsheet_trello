@@ -10,7 +10,7 @@ inventory = google_sheets.get_inventory(google_creds)
 board = trello.get_trello_board_by_name("FilaFiber Inventory")
 trello.sync_inventory_to_trello(inventory, board)
 
-google_sheets.transfer_quantity(google_creds, "Nat", "Inventory", "Post-Processing", -3)
+#google_sheets.transfer_quantity(google_creds, "Nat", "Inventory", "Post-Processing", -3)
 
 print(inventory)
 

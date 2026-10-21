@@ -170,37 +170,56 @@ def transfer_quantity(creds, item_name, from_stage, to_stage, quantity):
     from_col = next((chr(i + 65) for i, header in enumerate(header_row) if header == from_stage), None)
     to_col = next((chr(i + 65) for i, header in enumerate(header_row) if header == to_stage), None)
 
-    if from_col is None or to_col is None:
-        raise ValueError(f"One or both columns '{from_stage}' and '{to_stage}' not found.")
+    if from_stage != "Printing" and from_col is None:
+        raise ValueError(f"Column '{from_stage}' not found.")
+
+    if to_stage != "Printing" and to_col is None:
+        raise ValueError(f"Column '{to_stage}' not found.")
 
     service = build('sheets', 'v4', credentials=creds)
     sheet = service.spreadsheets()
 
     # Get current quantities
-    from_range_name = f"{SHEET_NAME}!{from_col}{row}"
-    to_range_name = f"{SHEET_NAME}!{to_col}{row}"
+     # Subtract from the source, unless the source is Printing
+    if from_stage != "Printing":
+        from_range_name = f"{SHEET_NAME}!{from_col}{row}"
 
-    from_result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=from_range_name).execute()
-    to_result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=to_range_name).execute()
+        from_result = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=from_range_name
+        ).execute()
 
-    current_from_quantity = int(from_result.get('values', [[0]])[0][0]) if from_result.get('values') else 0
-    current_to_quantity = int(to_result.get('values', [[0]])[0][0]) if to_result.get('values') else 0
+        current_from = int(
+            from_result.get("values", [[0]])[0][0]
+        )
 
-    # Update quantities
-    if(current_from_quantity - quantity >= 0):
-        new_from_quantity = current_from_quantity - quantity
-    else:
-        raise ValueError(f"Not enough quantity in '{from_stage}' to transfer. Current: {current_from_quantity}, Requested: {quantity}")
-    new_to_quantity = current_to_quantity + quantity
+        if current_from < quantity:
+            raise ValueError(
+                f"Not enough quantity in '{from_stage}'. "
+                f"Current: {current_from}, Requested: {quantity}"
+            )
 
-    data_list.append({
-        'range': from_range_name,
-        'values': [[new_from_quantity]]
-    })
-    if to_stage != "Printing":  # Only update the "to" stage if it's not "Printing"`
         data_list.append({
-            'range': to_range_name,
-            'values': [[new_to_quantity]]
+            "range": from_range_name,
+            "values": [[current_from - quantity]]
+        })
+
+    # Add to the destination, unless the destination is Printing
+    if to_stage != "Printing":
+        to_range_name = f"{SHEET_NAME}!{to_col}{row}"
+
+        to_result = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=to_range_name
+        ).execute()
+
+        current_to = int(
+            to_result.get("values", [[0]])[0][0]
+        )
+
+        data_list.append({
+            "range": to_range_name,
+            "values": [[current_to + quantity]]
         })
 
     return update_quantity(creds, data_list)
