@@ -21,12 +21,31 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-
+          
+      - name: Diagnose GitHub OIDC
+        shell: bash
+        run: |
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+            | python -c "import sys,json; print(json.load(sys.stdin)['value'])")
+      
+          TOKEN="$TOKEN" python - <<'PY'
+          import os, json, base64
+          payload = os.environ["TOKEN"].split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+          print("aud:", claims.get("aud"))
+          print("sub:", claims.get("sub"))
+          print("repository:", claims.get("repository"))
+          print("ref:", claims.get("ref"))
+          PY
+          
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-east-1
+            role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+            aws-region: us-east-1
 
       - name: Build Lambda package
         run: |
