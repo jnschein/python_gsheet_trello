@@ -2,14 +2,23 @@ import json
 import requests
 import os
 from google_sheets import authenticate_google_sheets
+from googleapiclient.discovery import build
 
 def test_google_auth(event, context):
     creds = authenticate_google_sheets()
 
+    service = build("sheets", "v4", credentials=creds)
+
+    result = service.spreadsheets().values().get(
+        spreadsheetId="17IKUlHOxm4wzk9oOi1hy56zYPxiM9f6iMtk3XuhTp6k",
+        range="A1:D5"
+    ).execute()
+
+    print("Spreadsheet data:", result.get("values", []))
+
     return {
         "statusCode": 200,
-        "body": "Google authentication successful" if creds.valid
-                else "Google authentication failed"
+        "body": "Google Sheets read successful"
     }
 
 def get_trello_card(card_id):
