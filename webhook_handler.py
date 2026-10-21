@@ -1,6 +1,16 @@
 import json
 import requests
 import os
+from google_sheets import authenticate_google_sheets
+
+def test_google_auth(event, context):
+    creds = authenticate_google_sheets()
+
+    return {
+        "statusCode": 200,
+        "body": "Google authentication successful" if creds.valid
+                else "Google authentication failed"
+    }
 
 def get_trello_card(card_id):
     url = f"https://api.trello.com/1/cards/{card_id}"

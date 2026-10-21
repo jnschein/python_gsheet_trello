@@ -3,7 +3,8 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import os
-
+import json
+import boto3
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '17IKUlHOxm4wzk9oOi1hy56zYPxiM9f6iMtk3XuhTp6k'
@@ -12,10 +13,28 @@ NUMERIC_COLUMNS = ['Assembly', 'Post', 'Inventory', 'Total']
 
 
 def authenticate_google_sheets():
-    token_file_exists = os.path.exists('token.json')
+    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        ssm = boto3.client("ssm")
 
-    if token_file_exists:
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        response = ssm.get_parameter(
+            Name="/trello-inventory/google-oauth",
+            WithDecryption=True
+        )
+
+        token_info = json.loads(response["Parameter"]["Value"])
+        creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+
+        if not creds.valid:
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                raise RuntimeError("Google OAuth credentials require reauthorization")
+
+        return creds
+
+    # Existing local authentication
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
     else:
         creds = None
 
@@ -24,12 +43,13 @@ def authenticate_google_sheets():
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
-                './credentials.json', SCOPES)
+                "./credentials.json", SCOPES
+            )
             creds = flow.run_local_server(port=0)
 
-        with open('token.json', 'w') as token:
+        with open("token.json", "w") as token:
             token.write(creds.to_json())
-        
+
     return creds
 
 def find_header_row(creds, spreadsheet_id=SPREADSHEET_ID, sheet_name=SHEET_NAME):
