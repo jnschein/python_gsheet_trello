@@ -116,20 +116,18 @@ def get_inventory(creds, spreadsheet_id=SPREADSHEET_ID, sheet_name=SHEET_NAME):
 
 def find_row_by_name(creds, name, spreadsheet_id=SPREADSHEET_ID, sheet_name=SHEET_NAME):
     service = build('sheets', 'v4', credentials=creds)
-    sheet = service.spreadsheets()
-    result = sheet.values().get(spreadsheetId=spreadsheet_id, range=sheet_name).execute()
+    result = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=sheet_name).execute()
     values = result.get('values', [])
-
-    if not values:
-        print('No data found.')
-        return None
-
-    for row_index, row in enumerate(values):
-
-        if row and any(cell.strip() == name for cell in row):
-            return row_index + 1  # Return the 1-based index of the row
-
-    return None
+    header_index = next((i for i, row in enumerate(values) if 'Priority' in row and 'Name' in row), None)
+    if header_index is None:
+        raise ValueError('Header row with Name and Priority not found.')
+    name_col = values[header_index].index('Name')
+    matches = [i + 1 for i, row in enumerate(values[header_index + 1:], start=header_index + 1)
+               if len(row) > name_col and row[name_col].strip() == name]
+    if len(matches) > 1:
+        raise ValueError(f"Multiple inventory rows named '{name}'")
+    return matches[0] if matches else None
 
 
 def update_quantity(creds, data_list, spreadsheet_id=SPREADSHEET_ID, sheet_name=SHEET_NAME):
@@ -146,7 +144,15 @@ def update_quantity(creds, data_list, spreadsheet_id=SPREADSHEET_ID, sheet_name=
         body=body).execute()
     return result   
 
-def transfer_quantity(creds, item_name, from_stage, to_stage, quantity):
+def column_letter(number):
+    letters = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def transfer_quantity(creds, item_name, from_stage, to_stage, quantity=1):
     data_list = []
     if not isinstance(quantity, int) or quantity <= 0:
         raise ValueError("Transfer quantity must be a positive integer.")
@@ -166,9 +172,11 @@ def transfer_quantity(creds, item_name, from_stage, to_stage, quantity):
 
     if from_stage == to_stage:
         raise ValueError("Source and destination stages must be different.")
+    if from_stage not in ("Post", "Assembly", "Printing") or to_stage not in ("Post", "Assembly", "Printing"):
+        raise ValueError("Unsupported inventory stage.")
 
-    from_col = next((chr(i + 65) for i, header in enumerate(header_row) if header == from_stage), None)
-    to_col = next((chr(i + 65) for i, header in enumerate(header_row) if header == to_stage), None)
+    from_col = next((column_letter(i + 1) for i, header in enumerate(header_row) if header == from_stage), None)
+    to_col = next((column_letter(i + 1) for i, header in enumerate(header_row) if header == to_stage), None)
 
     if from_stage != "Printing" and from_col is None:
         raise ValueError(f"Column '{from_stage}' not found.")

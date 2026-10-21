@@ -1,174 +1,107 @@
+"""Trello board helpers and non-destructive one-card-per-unit synchronization."""
 import os
 import requests
 
-api_key = os.environ.get("TRELLO_API_KEY")
-api_token = os.environ.get("TRELLO_API_TOKEN")
-TRELLO_SHEET_MAP = { #Trello List Name: Google Sheet Column Name
-    "Printing": "Total",
-    "Assembly": "Assembly",
-    "Post-Processing": "Post"
-}
-TRELLO_LIST_NAMES = list(TRELLO_SHEET_MAP.keys())
+TRELLO_SHEET_MAP = {'Assembly': 'Assembly', 'Post-Processing': 'Post'}
+TRELLO_LIST_NAMES = ['Printing', 'Assembly', 'Post-Processing']
 
-def get_trello_boards():
 
-    url = "https://api.trello.com/1/members/me/boards"
-    query = {
-        'key': api_key,
-        'token': api_token
-    }
-
-    response = requests.get(url, params=query, timeout=15)
+def _request(method, path, **params):
+    auth = {'key': os.environ['TRELLO_API_KEY'], 'token': os.environ['TRELLO_API_TOKEN']}
+    response = requests.request(method, f'https://api.trello.com/1/{path}', params={**auth, **params}, timeout=15)
     response.raise_for_status()
     return response.json()
 
-def get_trello_board_by_name(board_name):
 
-    boards = get_trello_boards()
-    for board in boards:
+def get_trello_boards():
+    return _request('GET', 'members/me/boards')
+
+
+def get_trello_board_by_name(board_name):
+    for board in get_trello_boards():
         if board['name'] == board_name:
             board['inventory_lists'] = check_trello_lists(board['id'])
             return board
-    new_board = create_trello_board(board_name)
-    return new_board
+    return create_trello_board(board_name)
 
-def check_trello_lists(board_id): 
 
-    url = f"https://api.trello.com/1/boards/{board_id}/lists"
-    query = {
-        'key': api_key,
-        'token': api_token
-    }
-
-    response = requests.get(url, params=query, timeout=15)
-    response.raise_for_status()
-    existing_lists = response.json()
-    for list_name in TRELLO_LIST_NAMES:
-        if not any(lst['name'] == list_name for lst in existing_lists):
-            existing_lists.extend(create_trello_lists(board_id, [list_name]))
-    return existing_lists
+def check_trello_lists(board_id):
+    existing = _request('GET', f'boards/{board_id}/lists')
+    for name in TRELLO_LIST_NAMES:
+        if not any(item['name'] == name for item in existing):
+            existing.extend(create_trello_lists(board_id, [name]))
+    return existing
 
 
 def create_trello_board(board_name):
-
-    url = "https://api.trello.com/1/boards/"
-    query = {
-        'key': api_key,
-        'token': api_token,
-        'name': board_name,
-        'defaultLists': 'false'
-    }
-
-    response = requests.post(url, params=query, timeout=15)
-
-    response.raise_for_status()
-
-    board = response.json()
+    board = _request('POST', 'boards/', name=board_name, defaultLists='false')
     board['inventory_lists'] = create_trello_lists(board['id'], TRELLO_LIST_NAMES)
     return board
 
-def create_trello_lists(board_id, list_names):
-    url = f"https://api.trello.com/1/boards/{board_id}/lists"
-    query = {
-        'key': api_key,
-        'token': api_token
-    }
 
-    created_lists = []
-    for list_name in list_names:
-        query['name'] = list_name
-        response = requests.post(url, params=query, timeout=15)
-        response.raise_for_status()
-        created_lists.append(response.json())
-    return created_lists
+def create_trello_lists(board_id, list_names):
+    return [_request('POST', f'boards/{board_id}/lists', name=name) for name in list_names]
+
 
 def get_trello_cards(list_id):
-    url = f"https://api.trello.com/1/lists/{list_id}/cards"
-    query = {
-        'key': api_key,
-        'token': api_token
-    }
+    return _request('GET', f'lists/{list_id}/cards')
 
-    response = requests.get(url, params=query, timeout=15)
-    response.raise_for_status()
-    return response.json()
 
-def create_trello_card(list_id, card_name, card_desc):
-    url = f"https://api.trello.com/1/cards"
-    query = {
-        'key': api_key,
-        'token': api_token,
-        'idList': list_id,
-        'name': card_name,
-        'desc': card_desc
-    }
+def create_trello_card(list_id, card_name, card_desc=''):
+    return _request('POST', 'cards', idList=list_id, name=card_name, desc=card_desc)
 
-    response = requests.post(url, params=query, timeout=15)
-    response.raise_for_status()
-    return response.json()
 
 def delete_trello_card(card_id):
-    url = f"https://api.trello.com/1/cards/{card_id}"
-    query = {
-        'key': api_key,
-        'token': api_token
-    }
+    return _request('DELETE', f'cards/{card_id}')
 
-    response = requests.delete(url, params=query, timeout=15)
-    response.raise_for_status()
-    return response.json()
 
 def update_trello_card(card_id, card_name=None, card_desc=None):
-    url = f"https://api.trello.com/1/cards/{card_id}"
-    query = {
-        'key': api_key,
-        'token': api_token
-    }
-    if card_name:
-        query['name'] = card_name
-    if card_desc:
-        query['desc'] = card_desc
+    changes = {}
+    if card_name is not None:
+        changes['name'] = card_name
+    if card_desc is not None:
+        changes['desc'] = card_desc
+    return _request('PUT', f'cards/{card_id}', **changes)
 
-    response = requests.put(url, params=query, timeout=15)
-    response.raise_for_status()
-    return response.json()
 
-def sync_inventory_to_trello(inventory, board):
-    lists = check_trello_lists(board['id'])
+def sync_inventory_to_trello(inventory, board, apply=False):
+    """Plan/create missing unit cards. Never delete or modify existing cards.
 
-    for list in lists:
-        cards = get_trello_cards(list['id'])
+    Existing Quantity: N cards are *legacy* aggregate cards and must be
+    migrated separately. Printing is not derived from sheet counts.
+    """
+    lists = {item['name']: item for item in check_trello_lists(board['id'])
+             if item['name'] in TRELLO_LIST_NAMES}
+    plan = []
+    for stage, column in TRELLO_SHEET_MAP.items():
+        list_id = lists[stage]['id']
+        cards = get_trello_cards(list_id)
         for item in inventory:
-            quantity = item.get(TRELLO_SHEET_MAP.get(list['name'], ''), 0)
-            existing_card = next((card for card in cards if card['name'] == item['Name']), None)
+            name = item['Name']
+            target = int(item.get(column) or 0)
+            if target < 0:
+                raise ValueError(f'Negative {column} count for {name}')
+            matching = [c for c in cards if c['name'] == name]
+            legacy = [c for c in matching if (c.get('desc') or '').strip().startswith('Quantity:')]
+            if legacy:
+                plan.append({'stage': stage, 'item': name, 'action': 'MIGRATE_LEGACY',
+                             'legacy_card_ids': [c['id'] for c in legacy]})
+                continue
+            missing = target - len(matching)
+            if missing > 0:
+                plan.append({'stage': stage, 'item': name, 'action': 'CREATE', 'count': missing})
+                if apply:
+                    for _ in range(missing):
+                        create_trello_card(list_id, name)
+            elif missing < 0:
+                plan.append({'stage': stage, 'item': name, 'action': 'EXCESS', 'count': -missing})
+    return plan
 
-            if list['name'] == "Printing":
-                if quantity == 0 and not existing_card:
-                    cards.append(create_trello_card(list['id'], item['Name'], f"Quantity: {quantity}"))
-                elif quantity > 0 and existing_card:
-                    delete_trello_card(existing_card['id'])
-                    cards.remove(existing_card)
-            else:
-                if quantity > 0:
-                    if existing_card and existing_card['desc'] != f"Quantity: {quantity}":
-                        updated_card = update_trello_card(existing_card['id'], card_desc=f"Quantity: {quantity}")
-                        existing_card.update(updated_card)
-                    elif not existing_card:
-                        cards.append(create_trello_card(list['id'], item['Name'], f"Quantity: {quantity}"))
-                elif quantity == 0 and existing_card:
-                    delete_trello_card(existing_card['id'])
-                    cards.remove(existing_card)
 
-def calculate_inventory_adjustments(from_stage, to_stage, quantity):
-    adjustments = {
-        "Post-Processing": 0,
-        "Assembly": 0
-    }
-
+def calculate_inventory_adjustments(from_stage, to_stage, quantity=1):
+    adjustments = {'Post-Processing': 0, 'Assembly': 0}
     if from_stage in adjustments:
         adjustments[from_stage] -= quantity
-
     if to_stage in adjustments:
         adjustments[to_stage] += quantity
-
     return adjustments

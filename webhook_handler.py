@@ -1,76 +1,99 @@
+"""Trello -> Google Sheets inventory webhook. One card represents one unit."""
+import base64
+import hashlib
+import hmac
 import json
-import requests
+import logging
 import os
+
+import boto3
+from botocore.exceptions import ClientError
+
 from google_sheets import authenticate_google_sheets, transfer_quantity
-from googleapiclient.discovery import build
 
-def test_google_auth(event, context):
-    creds = authenticate_google_sheets()
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+STAGES = frozenset({'Printing', 'Post-Processing', 'Assembly'})
 
-    service = build("sheets", "v4", credentials=creds)
 
-    result = service.spreadsheets().values().get(
-        spreadsheetId="17IKUlHOxm4wzk9oOi1hy56zYPxiM9f6iMtk3XuhTp6k",
-        range="A1:D5"
-    ).execute()
+def _response(status, message):
+    return {'statusCode': status, 'body': message}
 
-    print("Spreadsheet data:", result.get("values", []))
 
-    return {
-        "statusCode": 200,
-        "body": "Google Sheets read successful"
-    }
+def _verify_signature(event):
+    """Verify Trello's X-Trello-Webhook signature over body + callback URL."""
+    callback_url = os.environ.get('TRELLO_CALLBACK_URL')
+    secret = os.environ.get('TRELLO_API_SECRET')
+    if not callback_url or not secret:
+        raise RuntimeError('Set TRELLO_CALLBACK_URL and TRELLO_API_SECRET before accepting POSTs')
+    headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
+    supplied = headers.get('x-trello-webhook', '')
+    raw_body = event.get('body') or ''
+    body_bytes = base64.b64decode(raw_body) if event.get('isBase64Encoded') else raw_body.encode('utf-8')
+    digest = hmac.new(secret.encode('utf-8'), body_bytes + callback_url.encode('utf-8'), hashlib.sha1).digest()
+    expected = base64.b64encode(digest).decode('ascii')
+    return hmac.compare_digest(supplied, expected), body_bytes
 
-def get_trello_card(card_id):
-    url = f"https://api.trello.com/1/cards/{card_id}"
 
-    params = {
-        "key": os.environ.get("TRELLO_API_KEY"),
-        "token": os.environ.get("TRELLO_API_TOKEN")
-    }
-
-    response = requests.get(url, params=params, timeout=15)
-    response.raise_for_status()
-    return response.json()
-    
 def lambda_handler(event, context):
-    method = event["requestContext"]["http"]["method"]
+    method = (event.get('requestContext', {}).get('http', {}).get('method')
+              or event.get('httpMethod', '')).upper()
+    if method == 'HEAD':
+        return _response(200, '')
+    if method != 'POST':
+        return _response(405, 'Method Not Allowed')
 
-    print("HTTP Method:", method)
-    
-    if method == "HEAD":
-        return {"statusCode": 200, "body": ""}
+    valid, body_bytes = _verify_signature(event)
+    if not valid:
+        return _response(401, 'Invalid Trello signature')
 
-    if method == "POST":
-        payload = json.loads(event.get("body") or "{}")
-        action = payload.get("action", {})
-        data = action.get("data", {})
+    payload = json.loads(body_bytes)
+    action = payload.get('action') or {}
+    data = action.get('data') or {}
+    if action.get('type') != 'updateCard' or not all(k in data for k in ('card', 'listBefore', 'listAfter')):
+        return _response(200, 'Ignored')
 
-        if action.get("type") == "updateCard" and "listBefore" in data and "listAfter" in data:
-            card_id = data["card"]["id"]
-            item_name = data["card"]["name"]
-            from_stage = data["listBefore"]["name"]
-            to_stage = data["listAfter"]["name"]
-            action_id = action["id"]
-            card = get_trello_card(card_id)
-            description = card["desc"]
-            quantity = int(description.split(":")[1].strip())
-            
-            print(f"Card moved: {item_name}, {from_stage} -> {to_stage}")
-            if from_stage in ("Printing", "Post-Processing", "Assembly") \
-                    and to_stage in ("Printing", "Post-Processing", "Assembly"):
+    from_stage = data['listBefore']['name']
+    to_stage = data['listAfter']['name']
+    if from_stage not in STAGES or to_stage not in STAGES or from_stage == to_stage:
+        return _response(200, 'Ignored')
 
-                creds = authenticate_google_sheets()
+    item_name = data['card']['name']
+    action_id = action['id']
+    table_name = os.environ.get('TRELLO_ACTIONS_TABLE')
+    if not table_name:
+        raise RuntimeError('TRELLO_ACTIONS_TABLE must be configured before inventory updates')
+    table = boto3.resource('dynamodb').Table(table_name)
 
-                transfer_quantity(
-                    creds,
-                    item_name,
-                    from_stage,
-                    to_stage,
-                    quantity
-                )
+    try:
+        table.put_item(
+            Item={'action_id': action_id, 'status': 'PROCESSING'},
+            ConditionExpression='attribute_not_exists(action_id)'
+        )
+    except ClientError as exc:
+        if exc.response['Error']['Code'] != 'ConditionalCheckFailedException':
+            raise
+        existing = table.get_item(Key={'action_id': action_id}, ConsistentRead=True).get('Item')
+        if existing and existing.get('status') == 'DONE':
+            logger.info('Skipping already processed action %s', action_id)
+            return _response(200, 'Already processed')
+        # Never acknowledge an uncertain in-progress action as completed.
+        return _response(503, 'Action processing; retry later')
 
-                print(f"Transferred {quantity} of '{item_name}' from {from_stage} to {to_stage}")
-        return {"statusCode": 200, "body": "OK"}
+    try:
+        creds = authenticate_google_sheets()
+        transfer_quantity(creds, item_name, from_stage, to_stage, 1)
+        table.update_item(
+            Key={'action_id': action_id},
+            UpdateExpression='SET #status = :done',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={':done': 'DONE'}
+        )
+    except Exception:
+        # Leave PROCESSING for investigation. Removing it could double-apply a
+        # successfully written sheet update if the failure happened afterward.
+        logger.exception('Action %s needs investigation; do not replay without reconciliation', action_id)
+        raise
 
-    return {"statusCode": 405, "body": "Method Not Allowed"}
+    logger.info('Moved one %s: %s -> %s (action %s)', item_name, from_stage, to_stage, action_id)
+    return _response(200, 'OK')
