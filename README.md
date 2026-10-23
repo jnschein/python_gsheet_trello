@@ -1,38 +1,32 @@
-# Trello inventory: one card per unit
+# Trello inventory v2
 
-Each card represents **one physical item**. Card descriptions no longer carry quantities. A movement between Printing, Post-Processing, and Assembly changes sheet quantities by exactly one. Printing is untracked in Google Sheets; Assembly and Post map to their sheet columns.
+## Behavior
+- **Printing:** exactly one desired card for each sheet item with `Total == 0`; no card when `Total != 0`. This is a *placeholder*, not a physical unit count.
+- **Assembly**, **Post-Processing**, **Inventory:** one card per unit based on sheet columns `Assembly`, `Post`, and `Inventory`.
+- Card movement between any two lists adjusts the tracked quantities by one; Printing has no stored count.
+- High / Medium / Low priority: Trello full-card covers in red / yellow / blue. Trello supplies the available shades, not exact custom pastel colors.
 
-## Before deploying
+## Deploy
+Replace `trello.py`, `google_sheets.py`, and `webhook_handler.py` in your repository. Keep `requirements.txt`. Your GitHub Action must package `trello.py` with Lambda because the webhook now imports it. The existing DynamoDB table, webhook signature settings, and IAM permissions remain necessary. Restore handler `webhook_handler.lambda_handler`.
 
-1. **Back up the Trello board and the spreadsheet.** Pause moving cards during migration.
-2. Create DynamoDB table (same AWS region as Lambda), with partition key `action_id` of type **String**, on-demand billing. Set Lambda environment variable `TRELLO_ACTIONS_TABLE` to its name. Add Lambda execution-role permissions `dynamodb:PutItem`, `dynamodb:GetItem`, and `dynamodb:UpdateItem` on this table.
-3. Set `TRELLO_CALLBACK_URL` to the **exact registered webhook callback URL**, and `TRELLO_API_SECRET` to your Trello application's API secret (not the API key or API token). Lambda must have these environment variables. The POST handler verifies `X-Trello-Webhook` HMAC signature. Keep secrets out of source control.
-4. Set Lambda **reserved concurrency to 1** to avoid simultaneous read-modify-write operations against Sheets. This does not make updates atomic against other sheet editors or external scripts.
-5. Deploy `webhook_handler.py`, `google_sheets.py`, `trello.py` and requirements using your existing GitHub Actions workflow. Restore handler `webhook_handler.lambda_handler`.
-6. Test with one card, check CloudWatch and sheet quantities. For testing, do not replay the same action ID and expect another adjustment.
+## Synchronize the board
+Run from a local environment that already has your Google OAuth credentials and `TRELLO_API_KEY` / `TRELLO_API_TOKEN`:
 
-## Convert existing cards
-
-Run locally (where your Google OAuth `token.json` is available):
-
-```
-python migrate_cards.py "YOUR BOARD NAME"
-python migrate_cards.py "YOUR BOARD NAME" --apply
+```bash
+python sync_board.py "YOUR BOARD NAME"
+python sync_board.py "YOUR BOARD NAME" --apply
 ```
 
-The first command previews changes. The second creates one card per unit according to current **Assembly** and **Post** sheet quantities, and archives aggregate `Quantity: N` cards. **It never changes the spreadsheet**. Existing Printing `Quantity: 0` placeholders are archived without replacement, because there is no authoritative Printing count in the provided code. Create Printing cards manually, one per physical item/job to be printed, once you have decided how many should exist. Ensure sheet counts accurately reflect physical units before migration. If you already moved some cards under the new system, reconcile the sheet before running this migration.
+The preview can create a missing Trello list, including Inventory, because board lookup ensures required lists exist. `--apply` creates missing cards and updates card colors. **It does not delete excess cards**, including Printing cards when Total becomes nonzero. Such cases are reported as `EXCESS` for manual reconciliation. A new Printing placeholder is created when a subsequent synchronization sees Total zero and no Printing card.
 
-`migrate_cards.py` is a **new file**. It is not needed in the Lambda deployment. Never run migration while card moves are being processed. Review dry-run output and take a board backup before applying. If migration is interrupted, re-run dry-run and verify counts; multiple legacy cards with the same name may need manual reconciliation.
+If old `Quantity: N` cards still exist, first preview and run `migrate_cards.py` with `--apply` only after backing up the board and disabling webhook processing. The migration archives legacy cards, creates individual cards, and never changes the spreadsheet.
 
-## Ongoing sync
+**Do not run the sync while webhook movements are in progress.** It uses sheet counts as source of truth; webhook updates must finish before syncing.
 
-`sync_inventory_to_trello(inventory, board)` now **only previews** missing or excess unit cards and reports legacy cards. `sync_inventory_to_trello(inventory, board, apply=True)` creates missing Assembly/Post unit cards only; it never deletes cards. Do not run this automatically after every webhook, because it could conflict with in-flight changes. Printing cards are not created by sync.
-
-## Reliability limits
-
-- DynamoDB conditionally claims an action ID. Successfully completed actions are marked `DONE` and duplicates are ignored.
-- If Sheets succeeds but DynamoDB's final status update fails, the action remains `PROCESSING` and needs manual reconciliation. This is intentional to prevent silently applying the same quantity twice. Investigate CloudWatch and the sheet before changing/removing a stuck record.
-- A failed Sheets update also leaves the action `PROCESSING`; investigate and reconcile manually. The webhook responds with an error so the failure is visible.
-- Trello webhook signature verification requires the exact registered callback URL. HEAD verification is still supported.
-- Sheet read/modify/write is not transactional. Reserved concurrency of 1 reduces races among Lambda invocations but not against manual edits or other writers.
-- Existing cards created before migration must be reconciled with sheet counts. Do not deploy the new webhook and continue moving aggregate cards.
+## Important constraints
+- The Printing list is a work queue based on `Total == 0`, **not** a physical quantity. Moving a Printing placeholder into a tracked list adds one unit and removes the placeholder from Printing. A later sync can recreate the placeholder if Total remains zero.
+- Sheet `Total` must reflect your intended zero/positive rule; if it is a formula, ensure Google Sheets recalculates it after inventory updates.
+- Trello colors use the native `red`, `yellow`, and `blue` palette, with full-card covers.
+- Existing DynamoDB idempotency behavior is preserved. A failed sheet update can leave an action marked `PROCESSING`, requiring manual reconciliation.
+- Lambda's concurrency should be limited to 1 to reduce simultaneous sheet read/modify/write races; DynamoDB action-ID deduplication does not serialize different actions.
+- This code has been syntax-checked and locally tested with mocks, not against your live Trello board or Google Sheet.

@@ -1,16 +1,23 @@
-"""Trello board helpers and non-destructive one-card-per-unit synchronization."""
+"""Trello helpers and safe spreadsheet-to-board reconciliation.
+
+Printing: exactly one desired card per item with Total == 0.
+Assembly, Post-Processing, Inventory: one card per physical unit.
+Existing excess cards are reported, never deleted automatically.
+"""
 import os
+from collections import Counter
 import requests
 
-TRELLO_SHEET_MAP = {'Assembly': 'Assembly', 'Post-Processing': 'Post'}
-TRELLO_LIST_NAMES = ['Printing', 'Assembly', 'Post-Processing']
+TRELLO_SHEET_MAP = {'Assembly': 'Assembly', 'Post-Processing': 'Post', 'Inventory': 'Inventory'}
+TRELLO_LIST_NAMES = ['Printing', 'Assembly', 'Post-Processing', 'Inventory']
+PRIORITY_COLORS = {'high': 'red', 'medium': 'yellow', 'low': 'blue'}
 
 
 def _request(method, path, **params):
     auth = {'key': os.environ['TRELLO_API_KEY'], 'token': os.environ['TRELLO_API_TOKEN']}
     response = requests.request(method, f'https://api.trello.com/1/{path}', params={**auth, **params}, timeout=15)
     response.raise_for_status()
-    return response.json()
+    return response.json() if response.content else {}
 
 
 def get_trello_boards():
@@ -47,8 +54,22 @@ def get_trello_cards(list_id):
     return _request('GET', f'lists/{list_id}/cards')
 
 
-def create_trello_card(list_id, card_name, card_desc=''):
-    return _request('POST', 'cards', idList=list_id, name=card_name, desc=card_desc)
+def set_card_priority(card_id, priority, current_cover=None):
+    """Set full-card cover using Trello's supported color palette."""
+    color = PRIORITY_COLORS.get(str(priority or '').strip().lower())
+    if not color:
+        return None
+    cover = current_cover or {}
+    if cover.get('color') == color and cover.get('size') == 'full':
+        return None
+    return _request('PUT', f'cards/{card_id}/cover', color=color, size='full')
+
+
+def create_trello_card(list_id, card_name, card_desc='', priority=None):
+    card = _request('POST', 'cards', idList=list_id, name=card_name, desc=card_desc)
+    if priority:
+        set_card_priority(card['id'], priority)
+    return card
 
 
 def delete_trello_card(card_id):
@@ -61,45 +82,66 @@ def update_trello_card(card_id, card_name=None, card_desc=None):
         changes['name'] = card_name
     if card_desc is not None:
         changes['desc'] = card_desc
-    return _request('PUT', f'cards/{card_id}', **changes)
+    return _request('PUT', f'cards/{card_id}', **changes) if changes else None
+
+
+def _legacy(card):
+    return (card.get('desc') or '').strip().startswith('Quantity:')
 
 
 def sync_inventory_to_trello(inventory, board, apply=False):
-    """Plan/create missing unit cards. Never delete or modify existing cards.
+    """Reconcile missing cards and priority colors; never delete excess cards.
 
-    Existing Quantity: N cards are *legacy* aggregate cards and must be
-    migrated separately. Printing is not derived from sheet counts.
+    Defaults to preview. Running --apply creates missing cards and updates covers.
+    Legacy aggregate cards are reported for separate migration.
     """
-    lists = {item['name']: item for item in check_trello_lists(board['id'])
-             if item['name'] in TRELLO_LIST_NAMES}
+    by_name = {item['Name']: item for item in inventory}
+    if len(by_name) != len(inventory):
+        raise ValueError('Duplicate item names in Google Sheets')
+    lists = {entry['name']: entry for entry in check_trello_lists(board['id'])
+             if entry['name'] in TRELLO_LIST_NAMES}
     plan = []
-    for stage, column in TRELLO_SHEET_MAP.items():
+    for stage in TRELLO_LIST_NAMES:
         list_id = lists[stage]['id']
         cards = get_trello_cards(list_id)
+        grouped = {}
+        for card in cards:
+            grouped.setdefault(card['name'], []).append(card)
         for item in inventory:
             name = item['Name']
-            target = int(item.get(column) or 0)
+            target = (1 if int(item.get('Total') or 0) == 0 else 0) if stage == 'Printing' else int(item.get(TRELLO_SHEET_MAP[stage]) or 0)
             if target < 0:
-                raise ValueError(f'Negative {column} count for {name}')
-            matching = [c for c in cards if c['name'] == name]
-            legacy = [c for c in matching if (c.get('desc') or '').strip().startswith('Quantity:')]
+                raise ValueError(f'Negative quantity for {name} in {stage}')
+            matching = grouped.get(name, [])
+            legacy = [c for c in matching if _legacy(c)]
             if legacy:
-                plan.append({'stage': stage, 'item': name, 'action': 'MIGRATE_LEGACY',
-                             'legacy_card_ids': [c['id'] for c in legacy]})
+                plan.append({'stage': stage, 'item': name, 'action': 'MIGRATE_LEGACY', 'ids': [c['id'] for c in legacy]})
                 continue
-            missing = target - len(matching)
-            if missing > 0:
-                plan.append({'stage': stage, 'item': name, 'action': 'CREATE', 'count': missing})
+            delta = target - len(matching)
+            if delta > 0:
+                plan.append({'stage': stage, 'item': name, 'action': 'CREATE', 'count': delta})
                 if apply:
-                    for _ in range(missing):
-                        create_trello_card(list_id, name)
-            elif missing < 0:
-                plan.append({'stage': stage, 'item': name, 'action': 'EXCESS', 'count': -missing})
+                    for _ in range(delta):
+                        card = create_trello_card(list_id, name, priority=item.get('Priority'))
+                        matching.append(card)
+            elif delta < 0:
+                plan.append({'stage': stage, 'item': name, 'action': 'EXCESS', 'count': -delta})
+            color = PRIORITY_COLORS.get(str(item.get('Priority') or '').strip().lower())
+            if color:
+                for card in matching:
+                    cover = card.get('cover') or {}
+                    if cover.get('color') != color or cover.get('size') != 'full':
+                        plan.append({'stage': stage, 'item': name, 'action': 'COLOR', 'card_id': card['id'], 'color': color})
+                        if apply:
+                            set_card_priority(card['id'], item['Priority'], cover)
+        for name, unknown_cards in grouped.items():
+            if name not in by_name:
+                plan.append({'stage': stage, 'item': name, 'action': 'UNKNOWN', 'count': len(unknown_cards)})
     return plan
 
 
 def calculate_inventory_adjustments(from_stage, to_stage, quantity=1):
-    adjustments = {'Post-Processing': 0, 'Assembly': 0}
+    adjustments = {'Post-Processing': 0, 'Assembly': 0, 'Inventory': 0}
     if from_stage in adjustments:
         adjustments[from_stage] -= quantity
     if to_stage in adjustments:

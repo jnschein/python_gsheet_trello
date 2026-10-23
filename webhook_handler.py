@@ -9,11 +9,12 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 
-from google_sheets import authenticate_google_sheets, transfer_quantity
+from google_sheets import authenticate_google_sheets, transfer_quantity, get_item_priority
+from trello import set_card_priority
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-STAGES = frozenset({'Printing', 'Post-Processing', 'Assembly'})
+STAGES = frozenset({'Printing', 'Post-Processing', 'Assembly', 'Inventory'})
 
 
 def _response(status, message):
@@ -94,6 +95,12 @@ def lambda_handler(event, context):
         # successfully written sheet update if the failure happened afterward.
         logger.exception('Action %s needs investigation; do not replay without reconciliation', action_id)
         raise
+
+    try:
+        priority = get_item_priority(creds, item_name)
+        set_card_priority(data['card']['id'], priority)
+    except Exception:
+        logger.exception('Inventory updated but card priority cover could not be refreshed')
 
     logger.info('Moved one %s: %s -> %s (action %s)', item_name, from_stage, to_stage, action_id)
     return _response(200, 'OK')

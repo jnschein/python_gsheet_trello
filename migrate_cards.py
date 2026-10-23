@@ -29,8 +29,16 @@ def main():
                 print(f'SKIP unknown item {name!r} in {stage}')
                 continue
             if stage == 'Printing':
-                print(f'Printing placeholder {name!r}: archive only (no quantity in sheet for Printing)')
+                # Replace legacy placeholder with one normal card only when Total is zero.
+                existing_units = [c for c in cards if c['name'] == name and c['id'] != card['id']
+                                  and not (c.get('desc') or '').strip().startswith('Quantity:')]
+                target = 1 if int(by_name[name].get('Total') or 0) == 0 else 0
+                needed = max(0, target - len(existing_units))
+                print(f'Printing {name!r}: total={by_name[name].get("Total")}, create={needed}, archive legacy={card["id"]}')
                 if args.apply:
+                    for _ in range(needed):
+                        new_card = create_trello_card(list_id, name, priority=by_name[name].get('Priority'))
+                        cards.append(new_card)
                     _request('PUT', f"cards/{card['id']}", closed='true')
                 continue
             target = int(by_name[name].get(TRELLO_SHEET_MAP[stage]) or 0)
@@ -41,7 +49,7 @@ def main():
             print(f'{stage}: {name!r}: sheet={target}, existing units={len(other_cards)}, create={needed}, archive legacy={card["id"]}')
             if args.apply:
                 for _ in range(needed):
-                    new_card = create_trello_card(list_id, name)
+                    new_card = create_trello_card(list_id, name, priority=by_name[name].get('Priority'))
                     cards.append(new_card)
                 _request('PUT', f"cards/{card['id']}", closed='true')
     print('Applied changes.' if args.apply else 'DRY RUN ONLY: no Trello cards changed.')

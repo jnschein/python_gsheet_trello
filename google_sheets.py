@@ -172,7 +172,7 @@ def transfer_quantity(creds, item_name, from_stage, to_stage, quantity=1):
 
     if from_stage == to_stage:
         raise ValueError("Source and destination stages must be different.")
-    if from_stage not in ("Post", "Assembly", "Printing") or to_stage not in ("Post", "Assembly", "Printing"):
+    if from_stage not in ("Post", "Assembly", "Inventory", "Printing") or to_stage not in ("Post", "Assembly", "Inventory", "Printing"):
         raise ValueError("Unsupported inventory stage.")
 
     from_col = next((column_letter(i + 1) for i, header in enumerate(header_row) if header == from_stage), None)
@@ -231,3 +231,12 @@ def transfer_quantity(creds, item_name, from_stage, to_stage, quantity=1):
         })
 
     return update_quantity(creds, data_list)
+
+
+def get_item_priority(creds, item_name):
+    """Return current sheet priority for a unique item name."""
+    inventory = get_inventory(creds)
+    matches = [item for item in inventory if item.get('Name') == item_name]
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one item named {item_name!r}, found {len(matches)}")
+    return matches[0].get('Priority')
