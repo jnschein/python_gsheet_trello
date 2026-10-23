@@ -55,14 +55,27 @@ def get_trello_cards(list_id):
 
 
 def set_card_priority(card_id, priority, current_cover=None):
-    """Set full-card cover using Trello's supported color palette."""
+    """Set a full-size colored Trello cover via the card update API."""
     color = PRIORITY_COLORS.get(str(priority or '').strip().lower())
     if not color:
         return None
     cover = current_cover or {}
     if cover.get('color') == color and cover.get('size') == 'full':
         return None
-    return _request('PUT', f'cards/{card_id}/cover', color=color, size='full')
+
+    auth = {'key': os.environ['TRELLO_API_KEY'], 'token': os.environ['TRELLO_API_TOKEN']}
+    response = requests.put(
+        f'https://api.trello.com/1/cards/{card_id}',
+        params=auth,
+        json={'cover': {'color': color, 'size': 'full', 'brightness': 'light'}},
+        timeout=15,
+    )
+    response.raise_for_status()
+    updated = response.json()
+    applied = updated.get('cover') or {}
+    if applied.get('color') != color or applied.get('size') != 'full':
+        raise RuntimeError(f'Trello did not apply the requested cover to card {card_id}: {applied}')
+    return updated
 
 
 def create_trello_card(list_id, card_name, card_desc='', priority=None):
