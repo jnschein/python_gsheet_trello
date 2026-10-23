@@ -14,7 +14,7 @@ from trello import set_card_priority
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-STAGES = frozenset({'Printing', 'Post-Processing', 'Assembly', 'Inventory'})
+STAGES = frozenset({'Printing', 'Post-Processing', 'Assembly', 'Inventory', 'Sold'})
 
 
 def _response(status, message):

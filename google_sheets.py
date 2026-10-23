@@ -172,16 +172,16 @@ def transfer_quantity(creds, item_name, from_stage, to_stage, quantity=1):
 
     if from_stage == to_stage:
         raise ValueError("Source and destination stages must be different.")
-    if from_stage not in ("Post", "Assembly", "Inventory", "Printing") or to_stage not in ("Post", "Assembly", "Inventory", "Printing"):
+    if from_stage not in ("Post", "Assembly", "Inventory", "Printing", "Sold") or to_stage not in ("Post", "Assembly", "Inventory", "Printing", "Sold"):
         raise ValueError("Unsupported inventory stage.")
 
     from_col = next((column_letter(i + 1) for i, header in enumerate(header_row) if header == from_stage), None)
     to_col = next((column_letter(i + 1) for i, header in enumerate(header_row) if header == to_stage), None)
 
-    if from_stage != "Printing" and from_col is None:
+    if from_stage not in ("Printing", "Sold") and from_col is None:
         raise ValueError(f"Column '{from_stage}' not found.")
 
-    if to_stage != "Printing" and to_col is None:
+    if to_stage not in ("Printing", "Sold") and to_col is None:
         raise ValueError(f"Column '{to_stage}' not found.")
 
     service = build('sheets', 'v4', credentials=creds)
@@ -189,7 +189,7 @@ def transfer_quantity(creds, item_name, from_stage, to_stage, quantity=1):
 
     # Get current quantities
      # Subtract from the source, unless the source is Printing
-    if from_stage != "Printing":
+    if from_stage not in ("Printing", "Sold"):
         from_range_name = f"{SHEET_NAME}!{from_col}{row}"
 
         from_result = sheet.values().get(
@@ -213,7 +213,7 @@ def transfer_quantity(creds, item_name, from_stage, to_stage, quantity=1):
         })
 
     # Add to the destination, unless the destination is Printing
-    if to_stage != "Printing":
+    if to_stage not in ("Printing", "Sold"):
         to_range_name = f"{SHEET_NAME}!{to_col}{row}"
 
         to_result = sheet.values().get(
@@ -230,6 +230,9 @@ def transfer_quantity(creds, item_name, from_stage, to_stage, quantity=1):
             "values": [[current_to + quantity]]
         })
 
+    # Printing and Sold have no tracked quantity column.
+    if not data_list:
+        return None
     return update_quantity(creds, data_list)
 
 
