@@ -136,6 +136,7 @@ def sync_inventory_to_trello(inventory, board, apply=False):
             color = PRIORITY_COLORS.get(str(item.get('Priority') or '').strip().lower())
             if color:
                 for card in matching:
+                    cover = card.get('cover') or {}
                     if not any(label.get('color') == color for label in card.get('labels', [])):
                         plan.append({'stage': stage, 'item': name, 'action': 'COLOR', 'card_id': card['id'], 'color': color})
                         if apply:
